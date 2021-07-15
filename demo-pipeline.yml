@@ -1,0 +1,42 @@
+pool:
+  vmImage: 'ubuntu-20.04'
+variables:
+  - group: Dev-AzureFoundation-PipelineVars
+  - group: ADO-PipelineInitialiser-SecureVariables
+
+
+stages:
+- template: az-infrastructure/terraform-stages.yml
+  parameters:
+    sp_client_id: $(foundationBuilderNonProdClientId)
+    sp_client_secret: $(iac-foundation-builder-nonprod)
+    subscription_id: $(IM-AZ-nonProd-Subscription)
+    tenant_id: $(im-prod-tenant)
+    environment: 'dev'
+    environmentDisplayName: Development
+    deploymentName: terraformDemo
+    terraformVersion: '1.0.0'
+    workingDirectory: tf-deploy/foundation
+    tfvarsPath: ../environments/dev/environment.tfvars
+    planOutputName: 'dev-terraformDemo-$(Build.BuildNumber).tfplan'
+    backendPath: ./backend/dev/backend.tf
+    addDestructionStep: true
+    dependsOn: []
+
+
+- template: az-infrastructure/terraform-stages.yml
+  parameters:
+    sp_client_id: $(foundationBuilderNonProdClientId)
+    sp_client_secret: $(iac-foundation-builder-nonprod)
+    subscription_id: $(IM-AZ-nonProd-Subscription)
+    tenant_id: $(im-prod-tenant)
+    environment: 'test'
+    environmentDisplayName: Testing
+    deploymentName: terraformTest
+    terraformVersion: '1.0.0'
+    workingDirectory: tf-deploy/foundation
+    tfvarsPath: ../environments/test/environment.tfvars
+    planOutputName: 'test-terraformTest-$(Build.BuildNumber).tfplan'
+    backendPath: ./backend/test/backend.tf
+    addDestructionStep: true
+    dependsOn: []

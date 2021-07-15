@@ -1,0 +1,66 @@
+pool:
+  vmImage: 'ubuntu-20.04'
+variables:
+  - group: Dev-AzureFoundation-PipelineVars
+  - group: ADO-PipelineInitialiser-SecureVariables
+  - name: devDeployment
+    value: terraformDevDemo
+
+
+stages:
+# Dev Demo Deployment Stage
+- template: az-infrastructure/terraform-planDeploy.yml
+  parameters:
+    sp_client_id: $(foundationBuilderNonProdClientId)     # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    sp_client_secret: $(iac-foundation-builder-nonprod)   # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    subscription_id: $(IM-AZ-nonProd-Subscription)        # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    tenant_id: $(im-prod-tenant)                          # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    environment: 'dev'
+    environmentDisplayName: Development
+    deploymentName: ${{ variables.devDeployment }}
+    terraformVersion: '1.0.0'
+    workingDirectory: tf-deploy/foundation
+    tfvarsPath: ../environments/dev/environment.tfvars
+    planOutputName: 'dev-terraformDemo-$(Build.BuildNumber).tfplan'
+    backendPath: ./backend/dev/backend.tf
+    dependsOn: []
+
+# Dev Demo Destruction Stage
+- template: az-infrastructure/terraform-destroy.yml
+  parameters:
+    sp_client_id: $(foundationBuilderNonProdClientId)      # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    sp_client_secret: $(iac-foundation-builder-nonprod)    # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    subscription_id: $(IM-AZ-nonProd-Subscription)         # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    tenant_id: $(im-prod-tenant)                           # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    environment: dev
+    environmentDisplayName: Development
+    workingDirectory: tf-deploy/foundation
+    deploymentName: ${{ variables.devDeployment }}
+    destructionPlanOutputName : destructionPlan_$(Build.BuildNumber).tfplan
+    terraformVersion: '1.0.0'
+    tfvarsPath: ../environments/dev/environment.tfvars
+    terraformStateStorageAccountUri: https://stimtfstatestoreuks01.blob.core.windows.net/tfplan/
+    backendPath: ./backend/dev/backend.tf  # Terarform backend config file is located in the Terraform configuration repo'.
+    addDestructionStep: true
+    artifactName: $(Build.BuildNumber)
+    dependsOn: [devDemoDeployment]
+
+
+######################################
+# TESTING ENVIRONMENT Deployment Stage
+- template: az-infrastructure/terraform-planDeploy.yml
+  parameters:
+    stageName: testDeployment
+    sp_client_id: $(foundationBuilderNonProdClientId)     # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    sp_client_secret: $(iac-foundation-builder-nonprod)   # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    subscription_id: $(IM-AZ-nonProd-Subscription)        # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    tenant_id: $(im-prod-tenant)                          # Read from ADO-PipelineInitialiser-SecureVariables variable group
+    environment: 'test'
+    environmentDisplayName: Testing
+    deploymentName: ${{ variables.devDeployment }}
+    terraformVersion: '1.0.0'
+    workingDirectory: tf-deploy/foundation
+    tfvarsPath: ../environments/test/environment.tfvars
+    planOutputName: 'test-terraformDemo-$(Build.BuildNumber).tfplan'
+    backendPath: ./backend/test/backend.tf
+    dependsOn: []                                # Will start deployment as soon as pipeline runs

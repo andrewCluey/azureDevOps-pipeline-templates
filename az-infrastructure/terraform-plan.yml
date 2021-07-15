@@ -1,0 +1,74 @@
+jobs:
+- job:
+  steps:
+    - task: TerraformInstaller@0
+      displayName: 'install Terraform'
+      inputs:
+        terraformVersion: ${{ parameters.terraformVersion }}
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Terraform Artifact'
+      inputs:
+        buildType:    'current'
+        artifactName: ${{ parameters.environment }}-${{ parameters.deploymentName }}-${{ parameters.artifactName }}
+        targetPath:   '$(Pipeline.Workspace)'
+    - task: CmdLine@2
+      displayName: 'initialise'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+      inputs:
+        workingDirectory: ${{ parameters.workingDirectory }}
+        script: |
+          terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+    - task: CmdLine@2
+      displayName: 'plan Terraform'
+      env:
+        ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+        ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+        ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+        ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+      inputs:
+        workingDirectory: ${{ parameters.workingDirectory }}
+      script: |
+        terraform plan -var-file=${{ parameters.tfvarsPath }} -out=${{ parameters.planOutputName }}
+    - task: CmdLine@2
+      displayName: 'Copy TF plan output to blob'
+      env:
+        AZCOPY_SPA_CLIENT_SECRET: ${{ parameters.sp_client_secret }}
+      inputs:
+        workingDirectory: ${{ parameters.workingDirectory }}
+        script: |
+          azcopy login --tenant-id ${{ parameters.tenant_id }} --service-principal --application-id ${{ parameters.sp_client_id }}
+          azcopy copy ${{parameters.planOutputName }} ${{ parameters.terraformStateStorageAccountUri }}${{ parameters.planOutputName }}
+    
+    - task: PowerShell@2
+      name: checkChange
+      displayName: 'Check the tfplan file for any changes to the deployment. If not, then pipeline ends.'
+      env:
+        ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+        ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+        ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        OUTPUT: ${{ parameters.planOutputname }}
+        tfvarsPath: ${{ parameters.tfvarsPath }}
+        backendPath: ${{ parameters.backendPath }}
+      inputs:
+        pwsh: true
+        workingDirectory: ${{ parameters.workingDirectory }}
+        targetType: 'inline'
+        script: |
+          terraform init -var-file=$Env:tfvarsPath
+          write-host "plan file is $Env:OUTPUT"
+          $plan = $(terraform show -json $Env:OUTPUT | ConvertFrom-Json)
+          $actions = $plan.resource_changes.change.actions
+          Write-Host "Terraform actions : $actions"
+          if (($actions -contains 'create') -or ($actions -contains 'delete') -or ($actions -contains 'update'))
+          {
+            Write-Host "Terraform will perform the following actions : $actions"
+            Write-Host "##vso[task.setvariable variable=anyTfChanges;isOutput=true]true"
+          } 
+          else
+          {
+            Write-Host "There is no change detected in Terraform tfplan file"
+          }
+

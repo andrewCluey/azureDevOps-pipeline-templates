@@ -1,0 +1,52 @@
+jobs:  
+- job: ManualReview
+      condition: eq(dependencies.Plan.outputs['checkChange.anyTfChanges'], 'true')
+      displayName: 'Manual Review/approval to confirm deployment.'
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: ''
+          instructions: 'Please review the results of the Terraform plan and approve or reject the deployment of the Foundation infrastructure'
+
+    - job: 'TerraformDeploy'
+      dependsOn: 'ManualReview'      
+      steps:
+      - task: TerraformInstaller@0
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+      
+      - task: CmdLine@2
+        displayName: 'Copy tfplan file FROM blob container'
+        env:
+          AZCOPY_SPA_CLIENT_SECRET: ${{ parameters.sp_client_secret }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            azcopy login --tenant-id ${{ parameters.tenant_id }} --service-principal --application-id ${{ parameters.sp_client_id }}
+            azcopy copy ${{ parameters.terraformStateStorageAccountUri }}${{ parameters.planOutputName }} ${{parameters.planOutputName }}
+      
+      - task: CmdLine@2
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+
+      - task: CmdLine@2
+        displayName: "Deploy configuration described in the tfplan file."
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform apply ${{ parameters.planOutputName  }} 

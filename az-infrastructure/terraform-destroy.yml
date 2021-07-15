@@ -1,0 +1,169 @@
+# Default parameter values.
+parameters:
+  environment: dev
+  environmentDisplayName: Development
+  workingDirectory: tf-deploy/foundation
+  deploymentName: terraformDev
+  destructionPlanOutputName : destructionPlan_$(Build.BuildNumber).tfplan
+  terraformVersion: '1.0.0'
+  tfvarsPath: ../environments/dev/environment.tfvars
+  terraformStateStorageAccountUri: https://stimtfstatestoreuks01.blob.core.windows.net/tfplan/
+  backendPath: ./backend/dev/backend.tf  # Terarform backend config file is located in the Terraform configuration repo'.
+  addDestructionStep: false
+  artifactName: $(Build.BuildNumber)
+  dependsOn: []
+
+
+stages:
+- stage: ${{ parameters.environment }}_destruction
+  displayName: 'Destroy ${{ parameters.environmentDisplayName }} infrastructure'
+  dependsOn: ${{ parameters.dependsOn }}
+  condition: eq('${{ parameters.addDestructionStep }}', true)
+  jobs:
+
+    - job: 'PlanDestroy'
+      continueOnError: false
+      steps:
+      - task: TerraformInstaller@0
+        name: installTf
+        displayName: 'Install Terraform'
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+      # Download Terraform configuration artifact
+      - task: DownloadPipelineArtifact@2
+        displayName: 'Download Terraform configuration Artifact'
+        inputs:
+          buildType:    'current'
+          artifactName: ${{ parameters.environment }}-${{ parameters.deploymentName }}-${{ parameters.artifactName }}
+          targetPath:   '$(Pipeline.Workspace)'
+      # Initialise Terraform backend
+      - task: CmdLine@2
+        name: initialiseTf
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+          ARM_ACCESS_KEY:      ${{ parameters.storage_access_key }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+      # Plan the destruction of the deployed infrastructure & generate plan file. 
+      - task: CmdLine@2
+        name: planDestruction
+        displayName: 'Plan Terraform destruction'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+          ARM_ACCESS_KEY:      ${{ parameters.storage_access_key }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform plan -destroy -var-file=${{ parameters.tfvarsPath }} -out=${{ parameters.destructionPlanOutputName }}
+      # Copy the destruction plan to blob storage.
+      - task: CmdLine@2
+        name: copyDestructionPlanToBlob
+        displayName: 'Copy TF destruction plan output to blob'
+        env:
+          AZCOPY_SPA_CLIENT_SECRET: ${{ parameters.sp_client_secret }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            azcopy login --tenant-id ${{ parameters.tenant_id }} --service-principal --application-id ${{ parameters.sp_client_id }}
+            azcopy copy ${{ parameters.destructionPlanOutputName }} ${{ parameters.terraformStateStorageAccountUri }}${{ parameters.destructionPlanOutputName }}
+      # PowerShell script to check the TFPlanOutput for any changes. If TRUE, then set variable ('anyTfChanges').
+      - task: PowerShell@2
+        name: checkChanges
+        displayName: 'Check the tfplan to see if there is anythign to destroy.'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+          OUTPUT: ${{ parameters.destructionPlanOutputName }}
+          tfvarsPath: ${{ parameters.tfvarsPath }}
+          backendPath: ${{ parameters.backendPath }}
+        inputs:
+          pwsh: true
+          workingDirectory: ${{ parameters.workingDirectory }}
+          targetType: 'inline'
+          script: |
+            terraform init -var-file=$Env:tfvarsPath
+            write-host "plan file is $Env:OUTPUT"
+            $plan = $(terraform show -json $Env:OUTPUT | ConvertFrom-Json)
+            $actions = $plan.resource_changes.change.actions
+            Write-Host "Terraform actions : $actions"
+            if (($actions -contains 'create') -or ($actions -contains 'delete') -or ($actions -contains 'update'))
+            {
+              Write-Host "Terraform will perform the following actions : $actions"
+              Write-Host "##vso[task.setvariable variable=anyTfChanges;isOutput=true]true"
+            }
+            else
+            {
+              Write-Host "There is no change detected in Terraform tfplan file"
+            }
+            write-host "tf change variable is set to: ($anyTfChanges)"
+
+# New pipeline Job to add a manual review before destruction can proceed. 
+    - job: destructionReview
+      dependsOn: 'PlanDestroy'
+      condition: eq(dependencies.PlanDestroy.outputs['checkChanges.anyTfChanges'], 'true')   # Changes in tfplanOutput must have been detected.
+      displayName: 'Manual review & approval to confirm destruction.'
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: ''
+          instructions: 'Please review the destruction plan and approve the infrastructure destruction.'
+
+
+# Job to perform the destruction. Depends on manual approval.
+    - job: 'TerraformDestroy'
+      dependsOn: destructionReview                                      # destructionReview job must have completed.
+      condition: in(dependencies.destructionReview.result, 'Succeeded') # Manual approval must have succeeded (confirmed).
+      steps:
+      - task: TerraformInstaller@0
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+      # Copy the destruciton plan from blob container to ensure destruction runs from the approved plan.
+      - task: CmdLine@2
+        name: copyDestroyPlan
+        displayName: 'Copy destruction plan file FROM blob container'
+        env:
+          AZCOPY_SPA_CLIENT_SECRET: ${{ parameters.sp_client_secret }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            azcopy login --tenant-id ${{ parameters.tenant_id }} --service-principal --application-id ${{ parameters.sp_client_id }}
+            azcopy copy ${{ parameters.terraformStateStorageAccountUri }}${{ parameters.destructionPlanOutputName }} ${{ parameters.destructionPlanOutputName }}
+      - task: CmdLine@2
+        name: initialiseTfBackend
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+          ARM_ACCESS_KEY:      ${{ parameters.storage_access_key }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+      # Perform the terraform destruction. Using the tfplan file.
+      - task: CmdLine@2
+        name: destroy
+        displayName: "destroy configuration as described in the tfplan file."
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+          ARM_ACCESS_KEY:      ${{ parameters.storage_access_key }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform apply ${{ parameters.destructionPlanOutputName }}
