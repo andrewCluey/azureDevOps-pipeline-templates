@@ -1,0 +1,257 @@
+# Azure DevOps pipeline template for validating & 'deploying' a 'Test' version of a Terraform module.
+
+parameters:
+  environment: dev
+  environmentDisplayName: Development
+  buildName: 
+  knownHosts:
+  sshPublicKey:
+  sshPassphrase:
+  sshSecureFile:
+  terraformVersion: '1.0.0'
+  deploymentName: 
+  workingDirectory:
+  dependsOn: []
+
+
+stages:
+- stage: validation
+  displayName: Validate ${{ parameters.buildname }}-$(Build.BuildNumber)
+  dependsOn: ${{ parameters.dependsOn  }}
+  jobs:
+    - job: Validate
+      timeoutInMinutes: 60
+      continueOnError: false
+      steps:
+      - task: InstallSSHKey@0
+        inputs:
+          knownHostsEntry: ${{ parameters.knownHosts }}
+          sshPublicKey: ${{ parameters.sshPublicKey }}
+          sshPassphrase: ${{ parameters.sshPassphrase }}
+          sshKeySecureFile: ${{ parameters.sshSecureFile }}
+      
+      - task: TerraformInstaller@0
+        displayName: 'install Terraform'
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+
+  
+      - bash: |
+          curl --location https://github.com/accurics/terrascan/releases/download/v1.9.0/terrascan_1.9.0_Linux_x86_64.tar.gz --output terrascan.tar.gz
+          tar xzf terrascan.tar.gz
+          sudo install terrascan /usr/local/bin
+          terrascan version
+        displayName:      'Install Terrascan'
+        workingDirectory: ${{ parameters.workingDirectory }}
+      
+
+      - bash: |
+          terrascan scan -v
+          scan = terrascan scan -v
+          echo "##vso[task.setvariable variable=Terrascan_output;]$scan"
+        displayName:     'Run security scan'
+        workingDirectory: ${{ parameters.workingDirectory }}
+      
+
+      - bash: |
+          terraform fmt
+          terraform init -backend=false
+          terraform validate
+        displayName:     'Terraform Validate'
+        workingDirectory: ${{ parameters.workingDirectory }}
+
+
+- stage: testDeploy
+  displayName: Deploy ${{ parameters.buildname }}-$(Build.BuildNumber)
+  dependsOn: ${{ parameters.dependsOn  }}
+  jobs:
+    - job: Plan
+      timeoutInMinutes: 60
+      continueOnError: false
+      steps:
+      - task: InstallSSHKey@0
+        inputs:
+          knownHostsEntry: ${{ parameters.knownHosts }}
+          sshPublicKey: ${{ parameters.sshPublicKey }}
+          sshPassphrase: ${{ parameters.sshPassphrase }}
+          sshKeySecureFile: ${{ parameters.sshSecureFile }}
+
+      - task: TerraformInstaller@0
+        displayName: 'install Terraform'
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+
+      - task: CmdLine@2
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init
+
+      - task: CmdLine@2
+        displayName: 'Plan Terraform deployment'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform plan
+   
+
+    - job: ManualReview
+      dependsOn: Plan
+      displayName: 'Manual Review/approval to confirm deployment.'
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: ''
+          instructions: 'Please review the results of the Terraform plan and approve or reject the deployment of the Foundation infrastructure'
+
+
+    - deployment: 'TerraformDeploy'
+      displayName: 'Terraform apply ${{ parameters.deploymentName }}'
+      dependsOn: 'ManualReview'
+      condition: in(dependencies.ManualReview.result, 'Succeeded')
+      environment: ${{ parameters.environment }}
+      strategy: 
+        runOnce:
+          deploy:
+            steps:
+            - task: InstallSSHKey@0
+              inputs:
+                knownHostsEntry: ${{ parameters.knownHosts }}
+                sshPublicKey: ${{ parameters.sshPublicKey }}
+                sshPassphrase: ${{ parameters.sshPassphrase }}
+                sshKeySecureFile: ${{ parameters.sshSecureFile }}
+            
+            - task: TerraformInstaller@0
+              inputs:
+                terraformVersion: ${{ parameters.terraformVersion }}
+
+            - task: CmdLine@2
+              displayName: "Initialise Terraform deployment"
+              env:
+                ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+                ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+                ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+                ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+              inputs:
+                workingDirectory: ${{ parameters.workingDirectory }}
+                script: |
+                  terraform init
+
+            - task: CmdLine@2
+              displayName: "Deploy configuration described in the tfplan file."
+              env:
+                ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+                ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+                ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+                ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+              inputs:
+                workingDirectory: ${{ parameters.workingDirectory }}
+                script: |
+                  terraform apply
+
+
+- stage: testDestroy
+  displayName: Destroy ${{ parameters.buildname }}-$(Build.BuildNumber)
+  dependsOn: 'TerraformDeploy'
+  jobs:
+    - job: planDestroy
+      steps:
+      - task: InstallSSHKey@0
+        inputs:
+          knownHostsEntry: ${{ parameters.knownHosts }}
+          sshPublicKey: ${{ parameters.sshPublicKey }}
+          sshPassphrase: ${{ parameters.sshPassphrase }}
+          sshKeySecureFile: ${{ parameters.sshSecureFile }}
+      
+      - task: TerraformInstaller@0
+        displayName: 'install Terraform'
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+
+      - task: CmdLine@2
+        name: initialiseTf
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init
+
+      - task: CmdLine@2
+        name: planDestruction
+        displayName: 'Plan Terraform destruction'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform plan -destroy
+
+
+    - job: destructionReview
+      dependsOn: planDestruction
+      displayName: 'Manual review & approval to confirm destruction.'
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: ''
+          instructions: 'Please review the destruction plan and approve.'
+
+
+    - job: 'TerraformDestroy'
+      dependsOn: destructionReview
+      condition: in(dependencies.destructionReview.result, 'Succeeded')
+      steps:
+      - task: TerraformInstaller@0
+        inputs:
+          terraformVersion: ${{ parameters.terraformVersion }}
+
+      - task: CmdLine@2
+        name: initialiseTfBackend
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init
+
+      - task: CmdLine@2
+        name: destroy
+        displayName: "destroy configuration"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform apply -destroy
+
+            
