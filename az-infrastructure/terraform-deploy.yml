@@ -1,20 +1,28 @@
-# Azure DevOps pipeline template for validating & 'building' a Terraform module.
+# Azure DevOps pipeline template for Azure Infrastructure deployment using Terraform.
 
+# Default parameter values.
 parameters:
-  environment: dev
-  environmentDisplayName: Development
-  buildName: 
-  workingDirectory: 
+  environment: 'Dev'  # Must be one of 'Dev'; 'Plat'; 'PreProd'; 'Prod' ; 'Test' or 'Sandpit'
+  environmentDisplayName: 'Development'
+  workingDirectory: 'tf-deploy/foundation'
+  knownHosts:
+  sshPublicKey:
+  sshPassphrase:
+  sshSecureFile:
   deploymentName: 
   terraformVersion: '1.0.0'
+  anyTfChanges: false
+  tfvarsPath: ../environments/Dev/environment.tfvars
+  terraformPlanStorageAccountUri: 
+  backendPath: ./backend/Dev/backend.tf   # Terarform backend config file is located in the Terraform configuration repo'.
   dependsOn: []
 
 stages:
 - stage: ${{ parameters.deploymentName }}
-  displayName: Validate ${{ parameters.buildname }}-$(Build.BuildNumber)
+  displayName: Deploy ${{ parameters.environmentDisplayName }}
   dependsOn: ${{ parameters.dependsOn  }}
   jobs:
-    - job: Validate
+    - job: PlanTfDeployment # Publish artifact & PLan TF Deployment
       timeoutInMinutes: 60
       continueOnError: false
       steps:
@@ -30,28 +38,174 @@ stages:
         displayName: 'install Terraform'
         inputs:
           terraformVersion: ${{ parameters.terraformVersion }}
-
-  
-      - bash: |
-          curl --location https://github.com/accurics/terrascan/releases/download/v1.9.0/terrascan_1.9.0_Linux_x86_64.tar.gz --output terrascan.tar.gz
-          tar xzf terrascan.tar.gz
-          sudo install terrascan /usr/local/bin
-          terrascan version
-        displayName:      'Install Terrascan'
-        workingDirectory: ${{ parameters.workingDirectory }}
       
-
-      - bash: |
-          terrascan scan -v
-          scan = terrascan scan -v
-          echo "##vso[task.setvariable variable=Terrascan_output;]$scan"
-        displayName:     'Run security scan'
-        workingDirectory: ${{ parameters.workingDirectory }}
       
-
       - bash: |
           terraform fmt
           terraform init -backend=false
           terraform validate
         displayName:     'Terraform Validate'
         workingDirectory: ${{ parameters.workingDirectory }}
+      
+
+      - task: CmdLine@2
+        displayName: "Initialise Terraform deployment"
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            printenv
+            terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+      
+
+      - task: CmdLine@2
+        displayName: 'Plan Terraform deployment'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform plan -var-file=${{ parameters.tfvarsPath }} -out=${{ parameters.deploymentName }}-$(Build.BuildNumber) -compact-warnings
+      
+      
+      - task: CmdLine@2
+        displayName: 'Copy TF plan output to blob'
+        env:
+          AZCOPY_SPA_CLIENT_SECRET: ${{ parameters.sp_client_secret }}
+        inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            pwd
+            azcopy login --tenant-id ${{ parameters.tenant_id }} --service-principal --application-id ${{ parameters.sp_client_id }}
+            azcopy copy ${{ parameters.deploymentName }}-$(Build.BuildNumber) ${{ parameters.terraformPlanStorageAccountUri }}${{ parameters.deploymentName }}-$(Build.BuildNumber)
+      
+      
+      # PowerShell script to check the TFPlanOutput for any changes. If TRUE, then set variable ('anyTfChanges').
+      - task: PowerShell@2
+        name: checkChanges
+        displayName: 'Check the tfplan file for any changes to the deployment.'
+        env:
+          ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+          ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+          ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+          ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+          OUTPUT: ${{ parameters.deploymentName }}-$(Build.BuildNumber)
+          tfvarsPath: ${{ parameters.tfvarsPath }}
+          backendPath: ${{ parameters.backendPath }}
+        inputs:
+          pwsh: true
+          workingDirectory: ${{ parameters.workingDirectory }}
+          targetType: 'inline'
+          script: |
+            terraform init -var-file=$Env:tfvarsPath
+            write-host -foregroundcolor Yellow "plan file is $Env:OUTPUT"
+            pwd
+            $plan = $(terraform show -json $Env:OUTPUT | ConvertFrom-Json)
+            $actions = $plan.resource_changes.change.actions
+            Write-Host "Terraform actions : $actions"
+            if (($actions -contains 'create') -or ($actions -contains 'delete') -or ($actions -contains 'update'))
+            {
+              Write-Host -BackgroundColor DarkRed -foregroundColor Gray "Terraform will perform the following actions : $actions"
+              Write-Host -ForegroundColor Red "##vso[task.setvariable variable=anyTfChanges;isOutput=true]true"
+            }
+            else
+            {
+              Write-Host -BackgroundColor DarkYellow -foregroundcolor blue "There is no change detected in the Terraform plan."
+            }
+
+
+
+    - job: 'publishArtifact'   # Publish the Terraform configuration as a DevOps Artifact IF there are detected changes.
+      dependsOn: PlanTfDeployment
+      condition: eq(dependencies.PlanTfDeployment.outputs['checkChanges.anyTfChanges'], 'true')
+      steps:
+      - task: CopyFiles@2
+        displayName: 'Copy Files to: $(build.artifactstagingdirectory)'
+        inputs:
+          TargetFolder: '$(build.artifactstagingdirectory)'
+
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact ${{ parameters.environment }}-${{ parameters.deploymentName }}-$(Build.BuildNumber)'
+        inputs:
+          ArtifactName: '${{ parameters.environment }}-${{ parameters.deploymentName }}-$(Build.BuildNumber)'
+
+
+
+    - job: ManualReview
+      dependsOn: publishArtifact
+      condition: eq(dependencies.PlanTfDeployment.outputs['checkChanges.anyTfChanges'], 'true')
+      displayName: 'Manual Review/approval to confirm deployment.'
+      pool: server
+      steps:
+      - task: ManualValidation@0
+        timeoutInMinutes: 1440
+        inputs:
+          notifyUsers: ''
+          instructions: 'Please review the results of the Terraform plan and approve or reject the deployment of the Foundation infrastructure'
+
+
+    - deployment: 'TerraformDeploy'
+      displayName: 'Terraform apply ${{ parameters.deploymentName }}'
+      dependsOn: 'ManualReview'
+      environment: ${{ parameters.environment }}
+      strategy: 
+        runOnce:
+          deploy:
+            steps:
+            - task: InstallSSHKey@0
+              inputs:
+                knownHostsEntry: ${{ parameters.knownHosts }}
+                sshPublicKey: ${{ parameters.sshPublicKey }}
+                sshPassphrase: ${{ parameters.sshPassphrase }}
+                sshKeySecureFile: ${{ parameters.sshSecureFile }}
+            
+            
+            - task: TerraformInstaller@0
+              inputs:
+                terraformVersion: ${{ parameters.terraformVersion }}
+            
+            
+            - task: CmdLine@2
+              displayName: 'Copy tfplan file FROM blob container'
+              env:
+                AZCOPY_SPA_CLIENT_SECRET: ${{ parameters.sp_client_secret }}
+              inputs:
+                workingDirectory: '../${{ parameters.environment }}-${{ parameters.deploymentName }}-$(Build.BuildNumber)/${{ parameters.workingDirectory }}'
+                script: |
+                  pwd
+                  azcopy login --tenant-id ${{ parameters.tenant_id }} --service-principal --application-id ${{ parameters.sp_client_id }}
+                  azcopy copy ${{ parameters.terraformPlanStorageAccountUri }}${{ parameters.deploymentName }}-$(Build.BuildNumber) ${{ parameters.deploymentName }}-$(Build.BuildNumber)
+            
+            
+            - task: CmdLine@2
+              displayName: "Initialise Terraform deployment"
+              env:
+                ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+                ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+                ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+                ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+              inputs:
+                workingDirectory: '../${{ parameters.environment }}-${{ parameters.deploymentName }}-$(Build.BuildNumber)/${{ parameters.workingDirectory }}'
+                script: |
+                  terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+
+
+            - task: CmdLine@2
+              displayName: "Deploy configuration described in the tfplan file."
+              env:
+                ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+                ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+                ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+                ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+              inputs:
+                workingDirectory: '../${{ parameters.environment }}-${{ parameters.deploymentName }}-$(Build.BuildNumber)/${{ parameters.workingDirectory }}'
+                script: |
+                  terraform apply ${{ parameters.deploymentName }}-$(Build.BuildNumber)

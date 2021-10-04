@@ -1,0 +1,46 @@
+trigger:
+- Dev
+pool:
+  vmImage: 'ubuntu-20.04'
+variables:
+  - name: majorVersion
+    value: 1
+  - name: minorVersion
+    value: 1
+  - group: SSH-Vars
+  - group: Dev-vars
+  - name: devManFoundationPlanOutputFile
+    value: devMan-AzDev
+
+resources:
+  repositories:
+    - repository: tfTemplates   # Name to assign to this resource within this pipeline.
+      type: git                 # Repository type. Azure DevOps would be 'git'.
+      name: 'AzureInfrastructure/azuredevops-pipeline-templates' # <AzureDevOpsProjectName>/<repo>
+
+# Majority of the input parameters here are variables that are declared in the variables list above...
+## ..... That is, anything within `$()`...
+## Variables can either be standalone, or part of a variable group (Library) within Azure DevOps.
+name: $(majorVersion).$(minorversion).$(Rev:r)
+stages:
+- template: az-infrastructure/terraform-deploy.yml@tfTemplates
+  parameters:
+    deploymentName: AzureDevDeploymentDemo
+    knownHosts: $(knownHosts)
+    sshPublicKey: $(sshPublicKey)
+    sshPassphrase: $(cicd_user_ssh-pass)
+    sshSecureFile: 'ssh-key'
+    environment: Dev
+    environmentDisplayName: 'Deploy to Dev'
+    terraformVersion: '1.0.0'
+    workingDirectory: tf-deploy/foundation
+    backendPath: ./backend/Dev/backend.tf
+    tfvarsPath: ../../environments/Dev/environments.tfvars
+    planOutputName: "$(devManFoundationPlanOutputFile)-$(Build.BuildNumber).tfplan"
+    sp_client_id: $(dev-SPN-id)
+    sp_client_secret: $(dev-spn-secret)
+    subscription_id: $(Dev-SubscriptionID)
+    tenant_id: $(TenantID)
+    terraformPlanStorageAccountUri: 'https://planstorageaccountname.blob.core.windows.net/tfplan/DevFoundationPLanOutputFileName/'
+    dependsOn: []
+  

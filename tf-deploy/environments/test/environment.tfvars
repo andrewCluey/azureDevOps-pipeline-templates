@@ -1,1 +1,0 @@
-rg_name = "rg-test-asc-demo"
