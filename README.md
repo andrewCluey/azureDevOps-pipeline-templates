@@ -3,7 +3,7 @@ Pipeline templates
 
 ## terraform pipelines
 
-There are several template files that can be used to for terraform deployments.
+There are several template files that can be used for terraform deployments.
 
 The first and perhaps simplest, is the ```terraform-stages.yml``` template file.
 
