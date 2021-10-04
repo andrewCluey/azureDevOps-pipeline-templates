@@ -95,7 +95,7 @@ stages:
     dependsOn: [devDemoDeployment]
 ```
 
-Notice that in the stage where we call the destruction template, a dependency has been set to ensure the destruction does not run until the 'planDeploy' stage has completed.
+Notice that in the stage where we call the destruction template, a dependency has been set to ensure the destruction does not run until the 'devDemoDeployment' stage has completed.
 
 The examples above all refer to templates located in the same repository. In reality, this is unlikely to be the case. The section below explains how to utilise templates from different respositories.
 
