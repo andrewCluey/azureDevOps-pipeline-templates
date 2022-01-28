@@ -11,7 +11,7 @@ parameters:
   tenant_id:
   terraformConfigPath: tf-deploy
   tfvarsPath: ../environments/Dev/environment.tfvars
-  backendPath: ../environments/Dev/backend.tf   # Terraform backend config file is located in the Terraform configuration repo'.
+  backendPath: ../environments/Dev/backend.tf
   buildType: current
   downloadType: single
   downloadPath: '$(System.ArtifactsDirectory)'
