@@ -1,0 +1,97 @@
+# Default parameter values.
+# ls -l .terraform/providers/registry.terraform.io/hashicorp/azurerm/2.99.0/linux_amd64
+parameters:
+  dependsOn: []
+  poolName: ''
+  environment: 'Dev'
+  runDeployment: 'true'
+  deploymentName:
+  terraformVersion: '1.1.4'
+  tf_log_level: error
+  artifactSuffix: $(Build.BuildNumber)
+  knownHosts:
+  sshPublicKey:
+  sshPassphrase:
+  sshSecureFile:
+  sp_client_id:
+  sp_client_secret:
+  tenant_id:
+  subscription_id:
+  #tfConfigDirectory: 'tf-deploy'
+  workingDirectory: 'tf-deploy'
+  tfvarsPath: ../environments/Dev/environment.tfvars
+  backendPath: ../environments/Dev/backend.tf
+  buildType: current
+  downloadType: single
+  downloadPath: '$(System.ArtifactsDirectory)'
+
+stages:
+- stage: 'TerraformApply_${{parameters.environment }}_${{ parameters.deploymentName }}'
+  dependsOn: ${{ parameters.dependsOn }}
+  ${{ if ne(parameters.poolName, '') }}:
+    pool:
+      name: ${{ parameters.poolName}}
+  ${{ else }}:
+    pool:
+      vmImage: windows-latest
+  jobs:
+  - deployment: 'TerraformApply'
+    displayName: 'Terraform apply ${{parameters.environment }}_${{ parameters.deploymentName }}'
+    environment: ${{ parameters.environment }}
+    condition: ${{ parameters.runDeployment }}
+    strategy: 
+      runOnce:
+        deploy:
+          steps:
+          - task: CmdLine@2
+            displayName: "check directory"
+            inputs:
+              workingDirectory: '../${{ parameters.environment }}-${{ parameters.artifactSuffix }}/${{ parameters.workingDirectory }}'
+              script: |
+                pwd
+                ls
+
+          - task: InstallSSHKey@0
+            inputs:
+              knownHostsEntry: ${{ parameters.knownHosts }}
+              sshPublicKey: ${{ parameters.sshPublicKey }}
+              sshPassphrase: ${{ parameters.sshPassphrase }}
+              sshKeySecureFile: ${{ parameters.sshSecureFile }}
+
+          - task: charleszipp.azure-pipelines-tasks-terraform.azure-pipelines-tasks-terraform-installer.TerraformInstaller@0 #TerraformInstaller@0
+            displayName: 'install Terraform'
+            inputs:
+              workingDirectory: '${{ parameters.workingDirectory }}'
+              terraformVersion: ${{ parameters.terraformVersion }}
+
+          - task: CmdLine@2
+            displayName: "Initialise Terraform deployment"
+            env:
+              ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+              ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+              ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+              ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+              TF_LOG:              ${{ parameters.tf_log_level }}
+            inputs:
+              workingDirectory: '../${{ parameters.environment }}-${{ parameters.artifactSuffix }}/${{ parameters.workingDirectory }}'
+              script: |
+                pwd
+                ls
+                find .
+                chmod -R a+x ./.terraform/providers/
+                terraform init -var-file=${{ parameters.tfvarsPath }} -backend-config=${{ parameters.backendPath }}
+  
+          - task: CmdLine@2
+            displayName: "Deploy configuration described in the tfplan file."
+            env:
+              ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+              ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+              ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+              ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+              TF_LOG:              ${{ parameters.tf_log_level }}
+            inputs:
+              workingDirectory: '../${{ parameters.environment }}-${{ parameters.artifactSuffix }}/${{ parameters.workingDirectory }}'
+              script: |
+                pwd
+                ls
+                terraform apply ${{ parameters.environment }}-${{ parameters.deploymentName }}-$(Build.BuildNumber).tfplan

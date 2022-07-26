@@ -1,0 +1,54 @@
+# Default parameter values.
+parameters:
+  dependsOn: []
+  terraformVersion: '1.1.4'
+  workingDirectory: 'examples'
+  testName: 'securrityValidation'
+  knownHosts:
+  sshPublicKey:
+  sshPassphrase:
+  sshKeySecureFile:
+  sp_client_id:
+  sp_client_secret:
+  subscription_id:
+  tenant_id:
+
+stages:
+- stage: 'TerraformSecurityValidate_${{ parameters.testName }}'
+  dependsOn: ${{ parameters.dependsOn }}
+  jobs:
+  - job: 'TerraformSecurityScan'
+    continueOnError: false
+    steps:
+    - task: InstallSSHKey@0
+      inputs:
+        hostName: ${{ parameters.knownHosts }}
+        sshPublicKey: ${{ parameters.sshPublicKey }}
+        sshPassphrase: ${{ parameters.sshPassphrase }}
+        sshKeySecureFile: ${{ parameters.sshKeySecureFile }}
+
+    - task: TerraformInstaller@0
+      displayName: 'install Terraform'
+      inputs:
+        workingDirectory: '${{ parameters.workingDirectory }}'
+        terraformVersion: ${{ parameters.terraformVersion }}
+ 
+    - task: CmdLine@2
+      displayName: "Install `tfsec`"
+      inputs:
+        script: | 
+          choco install tfsec
+
+    - task: CmdLine@2
+      displayName: "Run tfsec"
+      env:
+        ARM_CLIENT_ID:       ${{ parameters.sp_client_id }}
+        ARM_CLIENT_SECRET:   ${{ parameters.sp_client_secret }}
+        ARM_SUBSCRIPTION_ID: ${{ parameters.subscription_id }}
+        ARM_TENANT_ID:       ${{ parameters.tenant_id }}
+      inputs:
+          workingDirectory: ${{ parameters.workingDirectory }}
+          script: |
+            terraform init
+            tfsec
+
